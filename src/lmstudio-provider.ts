@@ -106,6 +106,7 @@ interface ParsedToolCall {
 interface ParsedToolCallCollection {
     toolCalls: ParsedToolCall[];
     consumedContent: boolean;
+    visibleContent?: string;
 }
 
 export interface LMStudioModelDefinition {
@@ -121,28 +122,22 @@ export interface LMStudioModelDefinition {
 }
 
 export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
+    private static readonly MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+
     private apiBase = 'http://localhost:12345';
     private modelsCache: vscode.LanguageModelChatInformation[] = [];
     private readonly changeEmitter = new vscode.EventEmitter<void>();
-    private refreshTimer: NodeJS.Timeout | undefined;
     private refreshInFlight: Promise<void> | undefined;
+    private lastRefreshAt = 0;
 
     readonly onDidChangeLanguageModelChatInformation = this.changeEmitter.event;
 
     constructor() {
         console.log('Initializing LM Studio provider');
         void this.refreshModels();
-        this.refreshTimer = setInterval(() => {
-            void this.refreshModels();
-        }, 5000);
     }
 
     dispose(): void {
-        if (this.refreshTimer) {
-            clearInterval(this.refreshTimer);
-            this.refreshTimer = undefined;
-        }
-
         this.changeEmitter.dispose();
     }
 
@@ -161,7 +156,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
         this.apiBase = this.resolveApiBase(options.configuration);
 
-        if (this.modelsCache.length === 0) {
+        if (this.modelsCache.length === 0 || this.isModelCacheStale()) {
             await this.refreshModels();
         }
 
@@ -320,7 +315,11 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
         }
 
-        const content = this.getVisibleAssistantContent(message, parsedToolCalls.consumedContent);
+        const content = this.getVisibleAssistantContent(
+            message,
+            parsedToolCalls.consumedContent,
+            parsedToolCalls.visibleContent
+        );
         if (content) {
             progress.report(new vscode.LanguageModelTextPart(content));
         }
@@ -364,6 +363,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 this.changeEmitter.fire();
                 console.log(`Models cache updated: ${newInfo.length} models available`);
             }
+
+            this.lastRefreshAt = Date.now();
         } catch (error) {
             console.error('Error refreshing LM Studio models:', error);
         }
@@ -515,6 +516,10 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         }
 
         return model.type === 'vlm';
+    }
+
+    private isModelCacheStale(): boolean {
+        return (Date.now() - this.lastRefreshAt) > LMStudioChatProvider.MODEL_CACHE_TTL_MS;
     }
 
     private shouldUseToolCallingRequest(options: vscode.ProvideLanguageModelChatResponseOptions): boolean {
@@ -684,7 +689,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         if (structuredCalls.length > 0) {
             return {
                 toolCalls: structuredCalls,
-                consumedContent: false
+                consumedContent: false,
+                visibleContent: this.getOpenAIMessageText(message.content)
             };
         }
 
@@ -700,7 +706,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
         return {
             toolCalls: [],
-            consumedContent: false
+            consumedContent: false,
+            visibleContent: this.getOpenAIMessageText(message.content)
         };
     }
 
@@ -726,13 +733,13 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         if (!text) {
             return {
                 toolCalls: [],
-                consumedContent: false
+                consumedContent: false,
+                visibleContent: ''
             };
         }
 
         const xmlMatches = [...text.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/g)];
         const toolCalls: ParsedToolCall[] = [];
-        let consumedContent = false;
 
         for (let index = 0; index < xmlMatches.length; index += 1) {
             const parsed = this.parseSingleToolCallBlock(xmlMatches[index][1], `${callIdPrefix}_${index + 1}`);
@@ -742,25 +749,67 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         }
 
         if (toolCalls.length > 0) {
-            consumedContent = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim().length === 0;
             return {
                 toolCalls,
-                consumedContent
+                consumedContent: true,
+                visibleContent: this.stripToolCallMarkup(text).trim()
             };
+        }
+
+        const fencedToolCalls = this.parseFencedJsonToolCalls(text, callIdPrefix);
+        if (fencedToolCalls.toolCalls.length > 0) {
+            return fencedToolCalls;
         }
 
         const jsonToolCall = this.parseStandaloneJsonToolCall(text, `${callIdPrefix}_1`);
         if (jsonToolCall) {
             return {
                 toolCalls: [jsonToolCall],
-                consumedContent: true
+                consumedContent: true,
+                visibleContent: ''
             };
         }
 
         return {
             toolCalls: [],
-            consumedContent: false
+            consumedContent: false,
+            visibleContent: text
         };
+    }
+
+    private parseFencedJsonToolCalls(text: string, callIdPrefix: string): ParsedToolCallCollection {
+        const fenceMatches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)];
+        const toolCalls: ParsedToolCall[] = [];
+
+        for (let index = 0; index < fenceMatches.length; index += 1) {
+            const block = fenceMatches[index][1]?.trim();
+            if (!block) {
+                continue;
+            }
+
+            const parsed = this.parseStandaloneJsonToolCall(block, `${callIdPrefix}_${index + 1}`);
+            if (parsed) {
+                toolCalls.push(parsed);
+            }
+        }
+
+        if (toolCalls.length === 0) {
+            return {
+                toolCalls: [],
+                consumedContent: false,
+                visibleContent: text
+            };
+        }
+
+        return {
+            toolCalls,
+            consumedContent: true,
+            visibleContent: text.replace(/```(?:json)?\s*[\s\S]*?```/g, '').trim()
+        };
+    }
+
+    private stripToolCallMarkup(text: string): string {
+        return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
     }
 
     private parseSingleToolCallBlock(block: string, callId: string): ParsedToolCall | undefined {
@@ -856,10 +905,11 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
     private getVisibleAssistantContent(
         message: { content?: string | null; reasoning_content?: string | null },
-        consumedContent: boolean
+        consumedContent: boolean,
+        visibleContent?: string
     ): string {
         if (consumedContent) {
-            return '';
+            return visibleContent?.trim() ?? '';
         }
 
         return this.getOpenAIMessageText(message.content);
