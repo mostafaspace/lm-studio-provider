@@ -233,6 +233,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 name: model.name,
                 family: model.family,
                 version: '1.0.0',
+                detail: 'LM Studio',
+                tooltip: `${model.name} is contributed via the LM Studio provider.`,
                 maxInputTokens: model.maxInputTokens,
                 maxOutputTokens: model.maxOutputTokens,
                 capabilities: {
@@ -346,11 +348,11 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     private getModelName(model: LMStudioApiModel): string {
-        const displayName = 'display_name' in model && model.display_name
-            ? model.display_name
-            : this.getModelId(model);
+        if ('display_name' in model && model.display_name) {
+            return model.display_name;
+        }
 
-        return `LM Studio: ${displayName}`;
+        return this.getModelId(model);
     }
 
     private getMaxContextLength(model: LMStudioApiModel): number {
