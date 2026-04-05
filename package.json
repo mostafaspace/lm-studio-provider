@@ -57,6 +57,11 @@
           "default": false,
           "description": "Expose LM Studio models in agent/autopilot mode with tool calling. Disabled by default because local runtimes can loop or stall on agent turns."
         },
+        "lmstudio.maxContextTokens": {
+          "type": "number",
+          "default": 32768,
+          "description": "The maximum KV context length. Copilot uses this limit to determine when to manually compact the history. Keep this identical to or slightly lower than the limit you allocate within LM Studio to prevent silent context truncation."
+        },
         "lmstudio.requestTimeoutSeconds": {
           "type": "number",
           "default": 120,

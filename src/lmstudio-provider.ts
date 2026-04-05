@@ -66,9 +66,23 @@ interface OpenAIChatCompletionToolCall {
     };
 }
 
+interface OpenAIChatCompletionContentPartText {
+    type: 'text';
+    text: string;
+}
+
+interface OpenAIChatCompletionContentPartImage {
+    type: 'image_url';
+    image_url: {
+        url: string;
+    };
+}
+
+type OpenAIChatCompletionContentPart = OpenAIChatCompletionContentPartText | OpenAIChatCompletionContentPartImage;
+
 interface OpenAIChatCompletionMessage {
     role: OpenAIRole;
-    content?: string | null;
+    content?: string | null | OpenAIChatCompletionContentPart[];
     name?: string;
     tool_call_id?: string;
     tool_calls?: OpenAIChatCompletionToolCall[];
@@ -191,12 +205,27 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             }
 
             const convertedMessages = this.convertMessages(messages);
+
             if (this.shouldUseToolCallingRequest(options)) {
+                const loopOrchestrator: OpenAIChatCompletionMessage = {
+                    role: 'system',
+                    content: `[URGENT AGENTIC DIRECTIVE]
+You are a relentless, autonomous agent operating within VS Code. Your goal is to COMPLETE the user's request exhaustively.
+CRITICAL RULES:
+1. TASK LIST: You MUST maintain a step-by-step markdown task list at the beginning of your response. Use [ ] for pending, [/] for in-progress, and [x] for completed tasks.
+2. THINKING: You MUST write out your reasoning before taking any action. 
+3. NO REPETITION: You MUST read previous tool results. NEVER repeat identical file reads or actions. If a file is read, analyze it and move on.
+4. CONTINUOUS EXECUTION: NEVER stop, summarize prematurely, or ask for permission. If the task is not 100% complete, you MUST continue calling the required tools.
+5. EXPLICIT TOOL EXECUTION: Instead of just talking about what you will do, YOU MUST IMMEDIATELY OUTPUT A TOOL CALL to do it.
+Act like a premium autonomous agent. Use tools iteratively until the entire job is done.`
+                };
+                convertedMessages.unshift(loopOrchestrator);
+
                 await this.provideToolCallingResponse(model, convertedMessages, options, progress, token);
                 return;
             }
 
-            await this.provideStreamingTextResponse(model, convertedMessages, progress, token);
+            await this.provideStreamingTextResponse(model, convertedMessages, options, progress, token);
         } catch (error) {
             throw new Error(`Failed to get response from LM Studio: ${error}`);
         }
@@ -214,6 +243,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     private async provideStreamingTextResponse(
         model: vscode.LanguageModelChatInformation,
         messages: OpenAIChatCompletionMessage[],
+        options: vscode.ProvideLanguageModelChatResponseOptions,
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         token: vscode.CancellationToken
     ): Promise<void> {
@@ -228,8 +258,9 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 model: model.id,
                 messages,
                 stream: true,
-                temperature: 0.7,
-                max_tokens: 2000
+                ...(options.modelOptions?.temperature !== undefined && { temperature: options.modelOptions.temperature }),
+                ...(options.modelOptions?.top_p !== undefined && { top_p: options.modelOptions.top_p }),
+                max_tokens: -1
             }),
             signal: request.controller.signal
         });
@@ -241,6 +272,9 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let startedReasoning = false;
+        let finishedReasoning = false;
+        let unparsedText = '';
 
         try {
             while (true) {
@@ -265,14 +299,49 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
                     try {
                         const parsed = JSON.parse(data);
-                        const content = parsed.choices?.[0]?.delta?.content;
-                        if (content) {
-                            progress.report(new vscode.LanguageModelTextPart(content));
+                        const delta = parsed.choices?.[0]?.delta;
+                        if (!delta) {
+                            continue;
+                        }
+
+                        if (delta.reasoning_content) {
+                            if (!startedReasoning) {
+                                progress.report(new vscode.LanguageModelTextPart('<details><summary>🧠 Thinking Process</summary>\n\n'));
+                                startedReasoning = true;
+                            }
+                            progress.report(new vscode.LanguageModelTextPart(delta.reasoning_content));
+                        }
+
+                        if (delta.content) {
+                            if (startedReasoning && !finishedReasoning) {
+                                progress.report(new vscode.LanguageModelTextPart('\n\n</details>\n\n'));
+                                finishedReasoning = true;
+                            }
+                            unparsedText += delta.content;
+                            let safeToYield = '';
+                            const lastLt = unparsedText.lastIndexOf('<');
+                            if (lastLt !== -1 && unparsedText.length - lastLt < 10) {
+                                safeToYield = unparsedText.substring(0, lastLt);
+                                unparsedText = unparsedText.substring(lastLt);
+                            } else {
+                                safeToYield = unparsedText;
+                                unparsedText = '';
+                            }
+                            if (safeToYield) {
+                                safeToYield = safeToYield.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
+                                safeToYield = safeToYield.replace(/<\/think>/g, '\n\n</details>\n\n');
+                                progress.report(new vscode.LanguageModelTextPart(safeToYield));
+                            }
                         }
                     } catch {
                         // Ignore partial stream frames that are not valid JSON on their own.
                     }
                 }
+            }
+            if (unparsedText) {
+                unparsedText = unparsedText.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
+                unparsedText = unparsedText.replace(/<\/think>/g, '\n\n</details>\n\n');
+                progress.report(new vscode.LanguageModelTextPart(unparsedText));
             }
         } finally {
             request.dispose();
@@ -296,10 +365,11 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             },
             body: JSON.stringify({
                 model: model.id,
-                messages: this.addToolCallingSystemPrompt(messages),
+                messages,
                 stream: true,
-                temperature: 0,
-                max_tokens: 2000,
+                temperature: options.modelOptions?.temperature ?? 0,
+                ...(options.modelOptions?.top_p !== undefined && { top_p: options.modelOptions.top_p }),
+                max_tokens: -1,
                 tools: this.convertTools(options.tools ?? []),
                 tool_choice: this.convertToolChoice(options.toolMode)
             }),
@@ -318,6 +388,9 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         let fullContent = '';
         let fullReasoning = '';
         let lastReportTime = Date.now();
+        let startedReasoning = false;
+        let finishedReasoning = false;
+        let unparsedText = '';
 
         try {
             while (true) {
@@ -349,14 +422,38 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                             continue;
                         }
 
-                        if (delta.content) {
-                            fullContent += delta.content;
-                            progress.report(new vscode.LanguageModelTextPart(delta.content));
+                        if (delta.reasoning_content) {
+                            if (!startedReasoning) {
+                                progress.report(new vscode.LanguageModelTextPart('<details><summary>🧠 Thinking Process</summary>\n\n'));
+                                startedReasoning = true;
+                            }
+                            fullReasoning += delta.reasoning_content;
+                            progress.report(new vscode.LanguageModelTextPart(delta.reasoning_content));
                             hasReported = true;
                         }
 
-                        if (delta.reasoning_content) {
-                            fullReasoning += delta.reasoning_content;
+                        if (delta.content) {
+                            if (startedReasoning && !finishedReasoning) {
+                                progress.report(new vscode.LanguageModelTextPart('\n\n</details>\n\n'));
+                                finishedReasoning = true;
+                            }
+                            fullContent += delta.content;
+                            unparsedText += delta.content;
+                            let safeToYield = '';
+                            const lastLt = unparsedText.lastIndexOf('<');
+                            if (lastLt !== -1 && unparsedText.length - lastLt < 10) {
+                                safeToYield = unparsedText.substring(0, lastLt);
+                                unparsedText = unparsedText.substring(lastLt);
+                            } else {
+                                safeToYield = unparsedText;
+                                unparsedText = '';
+                            }
+                            if (safeToYield) {
+                                safeToYield = safeToYield.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
+                                safeToYield = safeToYield.replace(/<\/think>/g, '\n\n</details>\n\n');
+                                progress.report(new vscode.LanguageModelTextPart(safeToYield));
+                            }
+                            hasReported = true;
                         }
 
                         if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
@@ -387,6 +484,12 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 } else if (hasReported) {
                     lastReportTime = Date.now();
                 }
+            }
+
+            if (unparsedText) {
+                unparsedText = unparsedText.replace(/<think>/g, '\n\n***🧠 Thinking Process:***\n\n');
+                unparsedText = unparsedText.replace(/<\/think>/g, '\n\n---\n\n');
+                progress.report(new vscode.LanguageModelTextPart(unparsedText));
             }
 
             const nativeToolCalls = Array.from(streamedNativeToolCalls.values());
@@ -563,14 +666,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     private getMaxContextLength(model: LMStudioApiModel): number {
-        const baseContext = model.max_context_length || 131072;
-
-        if ('loaded_instances' in model && Array.isArray(model.loaded_instances) && model.loaded_instances.length > 0) {
-            const loadedContext = model.loaded_instances[0]?.config?.context_length || 0;
-            return Math.max(baseContext, loadedContext);
-        }
-
-        return baseContext;
+        const configContext = vscode.workspace.getConfiguration('lmstudio').get<number>('maxContextTokens', 32768);
+        return configContext > 0 ? configContext : (model.max_context_length || 131072);
     }
 
     private estimateMaxOutputTokens(maxContextLength: number): number {
@@ -643,12 +740,35 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         return 'auto';
     }
 
+    private simplifyContent(parts: OpenAIChatCompletionContentPart[]): string | OpenAIChatCompletionContentPart[] | null {
+        if (parts.length === 0) return null;
+        if (parts.length === 1 && parts[0].type === 'text') {
+            return parts[0].text;
+        }
+
+        const hasVision = parts.some(p => p.type === 'image_url');
+        if (!hasVision) {
+            return parts.map(p => (p as OpenAIChatCompletionContentPartText).text).join('');
+        }
+
+        return [...parts];
+    }
+
     private convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): OpenAIChatCompletionMessage[] {
         const converted: OpenAIChatCompletionMessage[] = [];
 
         for (const message of messages) {
+            const openAiParts: OpenAIChatCompletionContentPart[] = [];
             const textParts: string[] = [];
             const assistantToolCalls: OpenAIChatCompletionToolCall[] = [];
+
+            const flushText = () => {
+                const combined = textParts.join('');
+                if (combined) {
+                    openAiParts.push({ type: 'text', text: combined });
+                }
+                textParts.length = 0;
+            };
 
             for (const part of message.content) {
                 if (part instanceof vscode.LanguageModelTextPart) {
@@ -658,6 +778,18 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
                 if (typeof part === 'string') {
                     textParts.push(part);
+                    continue;
+                }
+
+                if (part instanceof vscode.LanguageModelDataPart) {
+                    if (part.mimeType.startsWith('image/')) {
+                        flushText();
+                        const base64 = Buffer.from(part.data).toString('base64');
+                        openAiParts.push({
+                            type: 'image_url',
+                            image_url: { url: `data:${part.mimeType};base64,${base64}` }
+                        });
+                    }
                     continue;
                 }
 
@@ -674,14 +806,15 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 }
 
                 if (part instanceof vscode.LanguageModelToolResultPart && message.role === vscode.LanguageModelChatMessageRole.User) {
-                    const pendingText = this.joinTextParts(textParts);
-                    if (pendingText) {
+                    flushText();
+                    
+                    if (openAiParts.length > 0) {
                         converted.push({
                             role: 'user',
-                            content: pendingText,
+                            content: this.simplifyContent(openAiParts),
                             name: message.name
                         });
-                        textParts.length = 0;
+                        openAiParts.length = 0;
                     }
 
                     converted.push({
@@ -692,26 +825,25 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 }
             }
 
+            flushText();
+
             if (assistantToolCalls.length > 0) {
                 converted.push({
                     role: 'assistant',
-                    content: this.joinTextParts(textParts),
+                    content: this.simplifyContent(openAiParts),
                     name: message.name,
                     tool_calls: assistantToolCalls
                 });
                 continue;
             }
 
-            const content = this.joinTextParts(textParts);
-            if (!content) {
-                continue;
+            if (openAiParts.length > 0) {
+                converted.push({
+                    role: this.toOpenAIRole(message.role),
+                    content: this.simplifyContent(openAiParts),
+                    name: message.name
+                });
             }
-
-            converted.push({
-                role: this.toOpenAIRole(message.role),
-                content,
-                name: message.name
-            });
         }
 
         return converted;
@@ -775,8 +907,14 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         }
     }
 
-    private getOpenAIMessageText(content: string | null | undefined): string {
-        return typeof content === 'string' ? content : '';
+    private getOpenAIMessageText(content: string | null | undefined | OpenAIChatCompletionContentPart[]): string {
+        if (!content) {
+            return '';
+        }
+        if (typeof content === 'string') {
+            return content;
+        }
+        return content.map(part => part.type === 'text' ? part.text : '').join('');
     }
 
     private extractToolCalls(message: { content?: string | null; reasoning_content?: string | null; tool_calls?: OpenAIChatCompletionToolCall[] }): ParsedToolCallCollection {

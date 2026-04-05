@@ -113,6 +113,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (
             !event.affectsConfiguration('lmstudio.apiBase') &&
             !event.affectsConfiguration('lmstudio.enableExperimentalAgentMode') &&
+            !event.affectsConfiguration('lmstudio.maxContextTokens') &&
             !event.affectsConfiguration('lmstudio.requestTimeoutSeconds')
         ) {
             return;
