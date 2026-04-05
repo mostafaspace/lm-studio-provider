@@ -1,0 +1,70 @@
+{
+  "name": "lm-studio-provider",
+  "publisher": "local",
+  "displayName": "LM Studio Provider",
+  "description": "Integrates LM Studio with GitHub Copilot Chat",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "copilot",
+    "lm-studio",
+    "language-model",
+    "chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguageModelChat:lmstudio"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "lmstudio",
+        "displayName": "LM Studio",
+        "managementCommand": "lmstudio.diagnose"
+      }
+    ],
+    "commands": [
+      {
+        "command": "lmstudio.testModels",
+        "title": "LM Studio: Test Available Models"
+      },
+      {
+        "command": "lmstudio.diagnose",
+        "title": "LM Studio: Run Diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "LM Studio",
+      "properties": {
+        "lmstudio.apiBase": {
+          "type": "string",
+          "default": "http://localhost:12345",
+          "description": "The base URL of the LM Studio API server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
