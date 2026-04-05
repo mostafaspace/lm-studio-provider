@@ -290,7 +290,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             },
             body: JSON.stringify({
                 model: model.id,
-                messages,
+                messages: this.addToolCallingSystemPrompt(messages),
                 stream: false,
                 temperature: 0.7,
                 max_tokens: 2000,
@@ -689,8 +689,8 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         if (structuredCalls.length > 0) {
             return {
                 toolCalls: structuredCalls,
-                consumedContent: false,
-                visibleContent: this.getOpenAIMessageText(message.content)
+                consumedContent: true,
+                visibleContent: ''
             };
         }
 
@@ -810,6 +810,33 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
 
     private stripToolCallMarkup(text: string): string {
         return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
+    }
+
+    private addToolCallingSystemPrompt(messages: OpenAIChatCompletionMessage[]): OpenAIChatCompletionMessage[] {
+        const instruction: OpenAIChatCompletionMessage = {
+            role: 'system',
+            content: [
+                'When tools are available, never print tool calls as JSON, XML, markdown code fences, or pseudocode.',
+                'If a tool is needed, call it directly.',
+                'Do not narrate the tool call or restate its arguments.',
+                'If you include user-visible text in the same turn, keep it to a single brief sentence.'
+            ].join(' ')
+        };
+
+        const firstSystemIndex = messages.findIndex(message => message.role === 'system');
+        if (firstSystemIndex === -1) {
+            return [instruction, ...messages];
+        }
+
+        const mergedMessages = [...messages];
+        const existingContent = this.getOpenAIMessageText(mergedMessages[firstSystemIndex].content);
+        mergedMessages[firstSystemIndex] = {
+            ...mergedMessages[firstSystemIndex],
+            content: existingContent
+                ? `${existingContent}\n\n${instruction.content}`
+                : instruction.content
+        };
+        return mergedMessages;
     }
 
     private parseSingleToolCallBlock(block: string, callId: string): ParsedToolCall | undefined {
