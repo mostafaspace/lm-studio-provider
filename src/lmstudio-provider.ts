@@ -346,11 +346,11 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     private getModelName(model: LMStudioApiModel): string {
-        if ('display_name' in model && model.display_name) {
-            return model.display_name;
-        }
+        const displayName = 'display_name' in model && model.display_name
+            ? model.display_name
+            : this.getModelId(model);
 
-        return this.getModelId(model);
+        return `LM Studio: ${displayName}`;
     }
 
     private getMaxContextLength(model: LMStudioApiModel): number {
