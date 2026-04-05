@@ -41,7 +41,7 @@
       },
       {
         "command": "lmstudio.setApiBase",
-        "title": "LM Studio: Set Server URL"
+        "title": "LM Studio: Connection Settings"
       }
     ],
     "configuration": {

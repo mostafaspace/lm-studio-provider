@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { LMStudioChatProvider } from './lmstudio-provider';
 
 let lmStudioProvider: LMStudioChatProvider | undefined;
+let connectionPanel: vscode.WebviewPanel | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('LM Studio Provider extension activated');
@@ -97,26 +98,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const setApiBaseCommand = vscode.commands.registerCommand('lmstudio.setApiBase', async () => {
-        const config = vscode.workspace.getConfiguration('lmstudio');
-        const currentUrl = config.get<string>('apiBase') || 'http://localhost:12345';
-
-        const nextUrl = await vscode.window.showInputBox({
-            title: 'LM Studio Server URL',
-            prompt: 'Enter the LM Studio base URL',
-            value: currentUrl,
-            placeHolder: 'http://localhost:12345',
-            ignoreFocusOut: true,
-            validateInput: value => validateApiBase(value)
-        });
-
-        if (!nextUrl) {
-            return;
-        }
-
-        const normalizedUrl = normalizeApiBase(nextUrl);
-        await config.update('apiBase', normalizedUrl, vscode.ConfigurationTarget.Global);
-        lmStudioProvider?.forceRefresh();
-        void vscode.window.showInformationMessage(`LM Studio server URL set to ${normalizedUrl}`);
+        openConnectionPanel(context);
     });
 
     const configurationListener = vscode.workspace.onDidChangeConfiguration(event => {
@@ -154,6 +136,11 @@ function normalizeApiBase(value: string): string {
     return value.trim().replace(/\/+$/, '').replace(/\/v1\/?$/, '');
 }
 
+function getConfiguredApiBase(): string {
+    const config = vscode.workspace.getConfiguration('lmstudio');
+    return config.get<string>('apiBase') || 'http://localhost:12345';
+}
+
 function validateApiBase(value: string): string | undefined {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -170,4 +157,431 @@ function validateApiBase(value: string): string | undefined {
     }
 
     return undefined;
+}
+
+function openConnectionPanel(context: vscode.ExtensionContext): void {
+    if (connectionPanel) {
+        connectionPanel.reveal(vscode.ViewColumn.One);
+        void postConnectionState(connectionPanel);
+        return;
+    }
+
+    connectionPanel = vscode.window.createWebviewPanel(
+        'lmstudioConnection',
+        'LM Studio Connection',
+        vscode.ViewColumn.One,
+        {
+            enableScripts: true,
+            retainContextWhenHidden: true
+        }
+    );
+
+    connectionPanel.webview.html = getConnectionPanelHtml(connectionPanel.webview, context.extensionUri);
+
+    connectionPanel.onDidDispose(() => {
+        connectionPanel = undefined;
+    });
+
+    connectionPanel.webview.onDidReceiveMessage(async message => {
+        switch (message.type) {
+            case 'ready':
+                await postConnectionState(connectionPanel);
+                break;
+            case 'save':
+                await saveApiBaseFromPanel(connectionPanel, message.value);
+                break;
+            case 'test':
+                await testApiBaseFromPanel(connectionPanel, message.value);
+                break;
+            case 'reset':
+                await saveApiBaseFromPanel(connectionPanel, 'http://localhost:12345');
+                break;
+            default:
+                break;
+        }
+    });
+}
+
+async function postConnectionState(panel: vscode.WebviewPanel | undefined): Promise<void> {
+    if (!panel) {
+        return;
+    }
+
+    await panel.webview.postMessage({
+        type: 'state',
+        value: getConfiguredApiBase()
+    });
+}
+
+async function saveApiBaseFromPanel(panel: vscode.WebviewPanel | undefined, rawValue: string): Promise<void> {
+    const validationError = validateApiBase(rawValue);
+    if (validationError) {
+        await panel?.webview.postMessage({
+            type: 'result',
+            level: 'error',
+            message: validationError
+        });
+        return;
+    }
+
+    const normalizedUrl = normalizeApiBase(rawValue);
+    const config = vscode.workspace.getConfiguration('lmstudio');
+    await config.update('apiBase', normalizedUrl, vscode.ConfigurationTarget.Global);
+    lmStudioProvider?.forceRefresh();
+
+    await panel?.webview.postMessage({
+        type: 'state',
+        value: normalizedUrl
+    });
+    await panel?.webview.postMessage({
+        type: 'result',
+        level: 'success',
+        message: `Saved ${normalizedUrl}`
+    });
+}
+
+async function testApiBaseFromPanel(panel: vscode.WebviewPanel | undefined, rawValue: string): Promise<void> {
+    const validationError = validateApiBase(rawValue);
+    if (validationError) {
+        await panel?.webview.postMessage({
+            type: 'result',
+            level: 'error',
+            message: validationError
+        });
+        return;
+    }
+
+    const normalizedUrl = normalizeApiBase(rawValue);
+
+    try {
+        const response = await fetch(`${normalizedUrl}/api/v1/models`);
+        if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+        }
+
+        const payload = await response.json() as { models?: Array<{ type?: string }> };
+        const chatModels = (payload.models || []).filter(model => {
+            const type = model.type?.toLowerCase();
+            return type !== 'embedding' && type !== 'embeddings';
+        });
+
+        await panel?.webview.postMessage({
+            type: 'result',
+            level: 'success',
+            message: `Connection works. Found ${chatModels.length} chat model${chatModels.length === 1 ? '' : 's'}.`
+        });
+    } catch (error) {
+        await panel?.webview.postMessage({
+            type: 'result',
+            level: 'error',
+            message: `Could not reach ${normalizedUrl}: ${error}`
+        });
+    }
+}
+
+function getConnectionPanelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const nonce = getNonce();
+    const csp = [
+        "default-src 'none'",
+        `style-src ${webview.cspSource} 'unsafe-inline'`,
+        `script-src 'nonce-${nonce}'`,
+        `font-src ${webview.cspSource}`
+    ].join('; ');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${csp}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LM Studio Connection</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background:
+                radial-gradient(circle at top right, color-mix(in srgb, var(--vscode-button-background) 18%, transparent), transparent 28%),
+                linear-gradient(180deg, var(--vscode-editor-background), color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-sideBar-background)));
+        }
+
+        .shell {
+            max-width: 760px;
+            margin: 0 auto;
+            display: grid;
+            gap: 18px;
+        }
+
+        .hero,
+        .card {
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 18px;
+            background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-sideBar-background));
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+        }
+
+        .hero {
+            padding: 24px;
+            display: grid;
+            gap: 10px;
+        }
+
+        .eyebrow {
+            width: fit-content;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--vscode-button-background) 18%, transparent);
+            color: var(--vscode-button-foreground);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 28px;
+            line-height: 1.15;
+        }
+
+        p {
+            margin: 0;
+            line-height: 1.55;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .card {
+            padding: 22px;
+            display: grid;
+            gap: 16px;
+        }
+
+        label {
+            font-weight: 600;
+        }
+
+        .field {
+            display: grid;
+            gap: 10px;
+        }
+
+        input[type="url"] {
+            width: 100%;
+            border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+            border-radius: 12px;
+            padding: 14px 16px;
+            color: var(--vscode-input-foreground);
+            background: var(--vscode-input-background);
+            outline: none;
+            font: inherit;
+        }
+
+        input[type="url"]:focus {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+        }
+
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        button {
+            border: 0;
+            border-radius: 999px;
+            padding: 10px 16px;
+            cursor: pointer;
+            font: inherit;
+            transition: transform 140ms ease, opacity 140ms ease, background 140ms ease;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button.primary {
+            color: var(--vscode-button-foreground);
+            background: var(--vscode-button-background);
+        }
+
+        button.secondary {
+            color: var(--vscode-button-secondaryForeground);
+            background: var(--vscode-button-secondaryBackground);
+        }
+
+        button.ghost {
+            color: var(--vscode-foreground);
+            background: color-mix(in srgb, var(--vscode-button-secondaryBackground) 55%, transparent);
+            border: 1px solid var(--vscode-panel-border);
+        }
+
+        .status {
+            min-height: 24px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid transparent;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .status.neutral {
+            color: var(--vscode-descriptionForeground);
+            background: color-mix(in srgb, var(--vscode-sideBar-background) 55%, transparent);
+            border-color: var(--vscode-panel-border);
+        }
+
+        .status.success {
+            color: var(--vscode-testing-iconPassed);
+            background: color-mix(in srgb, var(--vscode-testing-iconPassed) 12%, transparent);
+            border-color: color-mix(in srgb, var(--vscode-testing-iconPassed) 35%, transparent);
+        }
+
+        .status.error {
+            color: var(--vscode-errorForeground);
+            background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
+            border-color: color-mix(in srgb, var(--vscode-errorForeground) 35%, transparent);
+        }
+
+        .meta {
+            display: grid;
+            gap: 8px;
+            padding-top: 4px;
+        }
+
+        .meta-item {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 10px 0;
+            border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border) 70%, transparent);
+        }
+
+        .meta-item:first-child {
+            border-top: 0;
+            padding-top: 0;
+        }
+
+        .meta-key {
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .meta-value {
+            font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+            word-break: break-all;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <section class="hero">
+            <div class="eyebrow">LM Studio</div>
+            <h1>Connection Settings</h1>
+            <p>Change the LM Studio server URL, test the connection, and save it without opening JSON settings files.</p>
+        </section>
+
+        <section class="card">
+            <div class="field">
+                <label for="apiBase">Server URL</label>
+                <input id="apiBase" type="url" spellcheck="false" placeholder="http://localhost:12345" />
+                <p>Use the LM Studio base URL. The extension will normalize trailing <code>/v1</code> automatically.</p>
+            </div>
+
+            <div class="row">
+                <button class="primary" id="saveButton">Save</button>
+                <button class="secondary" id="testButton">Test Connection</button>
+                <button class="ghost" id="resetButton">Reset Default</button>
+            </div>
+
+            <div class="status neutral" id="status" role="status" aria-live="polite">Ready.</div>
+
+            <div class="meta">
+                <div class="meta-item">
+                    <span class="meta-key">Configured URL</span>
+                    <span class="meta-value" id="configuredUrl">http://localhost:12345</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-key">Saved in</span>
+                    <span class="meta-value">VS Code user settings</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi();
+        const input = document.getElementById('apiBase');
+        const status = document.getElementById('status');
+        const configuredUrl = document.getElementById('configuredUrl');
+        const saveButton = document.getElementById('saveButton');
+        const testButton = document.getElementById('testButton');
+        const resetButton = document.getElementById('resetButton');
+
+        function setStatus(level, message) {
+            status.className = 'status ' + level;
+            status.textContent = message;
+        }
+
+        saveButton.addEventListener('click', () => {
+            setStatus('neutral', 'Saving connection settings...');
+            vscode.postMessage({ type: 'save', value: input.value });
+        });
+
+        testButton.addEventListener('click', () => {
+            setStatus('neutral', 'Testing connection...');
+            vscode.postMessage({ type: 'test', value: input.value });
+        });
+
+        resetButton.addEventListener('click', () => {
+            input.value = 'http://localhost:12345';
+            setStatus('neutral', 'Resetting to the default LM Studio URL...');
+            vscode.postMessage({ type: 'reset' });
+        });
+
+        window.addEventListener('message', event => {
+            const message = event.data;
+
+            if (message.type === 'state') {
+                input.value = message.value;
+                configuredUrl.textContent = message.value;
+                setStatus('neutral', 'Ready.');
+            }
+
+            if (message.type === 'result') {
+                setStatus(message.level, message.message);
+                if (message.level === 'success') {
+                    configuredUrl.textContent = input.value.trim() || configuredUrl.textContent;
+                }
+            }
+        });
+
+        vscode.postMessage({ type: 'ready' });
+    </script>
+</body>
+</html>`;
+}
+
+function getNonce(): string {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i += 1) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+
+    return text;
 }
