@@ -1,42 +1,48 @@
-# LM Studio Provider for VS Code Copilot Chat
+# LM Studio Provider for VS Code
 
-This extension integrates LM Studio with GitHub Copilot Chat, allowing you to use local language models directly in VS Code without needing external APIs.
+Use local LM Studio models in VS Code chat through the `LanguageModelChatProvider` API.
+
+This extension discovers chat-capable models from LM Studio, exposes them to VS Code under the `lmstudio` vendor, and forwards chat requests to LM Studio's OpenAI-compatible `/v1/chat/completions` endpoint.
 
 ## Features
 
-- 🚀 **Seamless Integration**: LM Studio models appear directly in Copilot Chat's model selector
-- 📱 **Auto-Discovery**: Auto-detects available models from your LM Studio instance
-- 💻 **Pure Local**: Run models locally with zero external dependencies
-- ⚙️ **Configurable**: Custom LM Studio server URL support
-- 🔄 **Real-time Updates**: Models are refreshed automatically
+- Automatic model discovery from LM Studio
+- Uses LM Studio context metadata instead of hardcoded placeholder limits
+- Filters out embedding-only models from chat registration
+- Periodically refreshes available models while VS Code is running
+- Includes built-in diagnostics for provider and model visibility
 
 ## Requirements
 
-- VS Code 1.90.0 or later
-- [LM Studio](https://lmstudio.ai/) running locally (default: `http://localhost:12345`)
-- GitHub Copilot Chat extension
-- A model loaded in LM Studio
+- VS Code `1.90.0` or later
+- LM Studio running locally or on a reachable host
+- LM Studio API enabled, defaulting to `http://localhost:12345`
+- GitHub Copilot Chat installed in VS Code
 
 ## Installation
 
-1. Clone or download this extension to your machine
-2. Run `npm install` in the extension directory
-3. Run `npm run compile` to build
-4. Press `F5` in VS Code to launch in debug mode
-5. Or package as .vsix: `npx vsce package`
+### From source
 
-## Quick Start
+```bash
+npm install
+npm run compile
+```
 
-1. **Start LM Studio** and load a model
-2. **Install this extension** (or launch with F5 in development mode)
-3. **Open Copilot Chat** in VS Code (Ctrl+Shift+I)
-4. **Click the model selector** at the top of the chat panel
-5. **Select your LM Studio model** from the dropdown
-6. **Start chatting!** Your local model will process all requests
+Then press `F5` in VS Code to launch an Extension Development Host.
+
+### As an installed extension
+
+Package and install the extension:
+
+```bash
+npx vsce package
+```
+
+Then install the generated `.vsix` in VS Code.
 
 ## Configuration
 
-Add this to your VS Code settings (`settings.json`) if your LM Studio is on a different host:
+Set the LM Studio base URL in your VS Code settings if you are not using the default host:
 
 ```json
 {
@@ -44,120 +50,59 @@ Add this to your VS Code settings (`settings.json`) if your LM Studio is on a di
 }
 ```
 
+## Usage
+
+1. Start LM Studio.
+2. Make sure the LM Studio local server is enabled.
+3. Open VS Code with this extension installed.
+4. Open chat and pick an LM Studio model from the model selector.
+
+If you changed the extension manifest or installed a new `.vsix`, fully restart VS Code instead of using `Reload Window`.
+
+## Commands
+
+- `LM Studio: Run Diagnostics`
+- `LM Studio: Test Available Models`
+
 ## Troubleshooting
 
-### Models not appearing in Copilot Chat
+### Check the LM Studio API
 
-1. **Verify LM Studio is running:**
-   ```bash
-   curl http://localhost:12345/v1/models
-   ```
-   Should return a JSON list of models.
+```bash
+curl http://localhost:12345/api/v1/models
+```
 
-2. **Check the diagnostic command:**
-   - Press `Ctrl+Shift+P`
-   - Run: `LM Studio: Run Diagnostics`
-   - Check the output panel for detailed information
+You should see LM Studio's model inventory. Chat models should have `type: "llm"`. Embedding models are intentionally ignored by this extension.
 
-3. **Reload VS Code:**
-   - Press `Ctrl+R` to reload the VS Code window
+### Run diagnostics inside VS Code
 
-4. **Test the extension:**
-   - Run: `LM Studio: Test Available Models` from command palette
+Use `LM Studio: Run Diagnostics` from the Command Palette. The output shows:
 
-### Connection errors
+- whether the extension is active
+- which models the extension discovered from LM Studio
+- which models VS Code currently sees under the `lmstudio` vendor
 
-- Ensure LM Studio's API is accessible at the configured address
-- Check firewall settings (port 12345 by default)
-- Verify you can reach the endpoint: `http://localhost:12345/v1/models`
+### Models do not appear in the picker
 
-### Models found but chat not working
-
-- Make sure a model is **loaded** in LM Studio (not just installed)
-- Check that LM Studio's API is responding to requests
-- Look at VS Code's debug console (F1 → "Debug: Toggle Debug Console") for error messages
-
-## How It Works
-
-The extension implements VS Code's `LanguageModelChatProvider` API to:
-
-1. **Discover Models** - Queries LM Studio's `/v1/models` endpoint at startup and periodically
-2. **Register with Copilot** - Registers as an Ollama provider (which Copilot Chat recognizes)
-3. **Stream Responses** - Forwards chat requests to LM Studio's OpenAI-compatible API
-4. **Handle Streaming** - Streams responses back to Copilot Chat in real-time
-
-## Architecture
-
-- **`src/extension.ts`** - Main entry point, registers the provider with Copilot Chat
-- **`src/lmstudio-provider.ts`** - Implements the `LanguageModelChatProvider` interface
-- **`package.json`** - Defines the extension manifest and commands
+- Confirm LM Studio is reachable at the configured URL.
+- Confirm you restarted VS Code after installing or updating the extension.
+- Confirm the diagnostics command lists the expected models.
+- If diagnostics finds models but the picker does not update, close all VS Code windows and launch VS Code again.
 
 ## Development
 
 ```bash
-# Install dependencies
 npm install
-
-# Compile TypeScript to JavaScript
 npm run compile
-
-# Watch for changes and auto-compile
 npm run watch
-
-# Run linter
-npm run lint
-
-# Test the extension
-npm test
 ```
 
-## Commands
+## Project structure
 
-The extension provides these commands in VS Code:
-
-- **`LM Studio: Test Available Models`** - Verify models are discoverable
-- **`LM Studio: Run Diagnostics`** - Detailed diagnostic information
-
-Access these via `Ctrl+Shift+P` (Command Palette).
-
-## Limitations
-
-- Copilot Chat in stable VS Code displays LM Studio models as "Ollama" models (they work identically)
-- Token counting is estimated (1 token ≈ 4 characters)
-- Requires LM Studio to be running - connection is not cached
-
-## API Compatibility
-
-This extension uses LM Studio's OpenAI-compatible API. Tested with:
-- LM Studio 0.2.x and later
-- OpenAI API format: `/v1/chat/completions`
-- Common models: Llama, Mistral, Qwen, Gemma, etc.
-
-## Contributing
-
-Contributions welcome! Please feel free to submit issues or pull requests.
+- `src/extension.ts` registers the provider and commands
+- `src/lmstudio-provider.ts` discovers LM Studio models and serves chat responses
+- `package.json` defines the extension manifest and contributions
 
 ## License
 
 MIT
-
-## Support
-
-- **LM Studio Issues**: Visit [lmstudio.ai](https://lmstudio.ai/)
-- **VS Code API**: [VS Code Extension API Docs](https://code.visualstudio.com/api)
-- **GitHub Issues**: Create an issue in this repository
-
-## FAQs
-
-**Q: Why do my models show as "Ollama" models?**
-A: Copilot Chat in stable VS Code only recognizes certain vendors (Ollama, OpenAI, etc.). We register as Ollama for compatibility, but it's actually connecting to LM Studio.
-
-**Q: Can I use this with a remote LM Studio server?**
-A: Yes! Change `lmstudio.apiBase` in settings to point to your remote server (e.g., `http://192.168.1.100:12345`).
-
-**Q: Will this work in VS Code Insiders?**
-A: Yes, and in the future, Insiders may display LM Studio natively without the Ollama label.
-
-**Q: How do I load a model in LM Studio?**
-A: Open LM Studio, select a model from the catalog, click "Load", and wait for it to load into memory.
-
