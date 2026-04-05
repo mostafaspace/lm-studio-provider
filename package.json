@@ -49,7 +49,7 @@
       "properties": {
         "lmstudio.apiBase": {
           "type": "string",
-          "default": "http://localhost:12345",
+          "default": "http://localhost:1234",
           "description": "The base URL of the LM Studio API server"
         }
       }

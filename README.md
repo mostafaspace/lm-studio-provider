@@ -9,14 +9,14 @@ This extension discovers chat-capable models from LM Studio, exposes them to VS 
 - Automatic model discovery from LM Studio
 - Uses LM Studio context metadata instead of hardcoded placeholder limits
 - Filters out embedding-only models from chat registration
-- Periodically refreshes available models while VS Code is running
+- Refreshes available models on demand with a cached fallback
 - Includes built-in diagnostics for provider and model visibility
 
 ## Requirements
 
 - VS Code `1.90.0` or later
 - LM Studio running locally or on a reachable host
-- LM Studio API enabled, defaulting to `http://localhost:12345`
+- LM Studio API enabled, defaulting to `http://localhost:1234`
 - GitHub Copilot Chat installed in VS Code
 
 ## Installation
@@ -46,7 +46,7 @@ Set the LM Studio base URL in your VS Code settings if you are not using the def
 
 ```json
 {
-  "lmstudio.apiBase": "http://localhost:12345"
+  "lmstudio.apiBase": "http://localhost:1234"
 }
 ```
 
@@ -72,7 +72,7 @@ The `Manage LM Studio...` button in VS Code model management opens the same conn
 ### Check the LM Studio API
 
 ```bash
-curl http://localhost:12345/api/v1/models
+curl http://localhost:1234/api/v1/models
 ```
 
 You should see LM Studio's model inventory. Chat models should have `type: "llm"`. Embedding models are intentionally ignored by this extension.

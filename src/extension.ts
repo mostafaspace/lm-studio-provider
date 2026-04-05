@@ -45,7 +45,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } else {
                 diagnostics.push('   No chat models found');
-                diagnostics.push('   Check that LM Studio is running at http://localhost:12345');
+                diagnostics.push('   Check that LM Studio is running at http://localhost:1234');
             }
         } catch (error) {
             diagnostics.push(`   Error: ${error}`);
@@ -88,7 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (!models || models.length === 0) {
             void vscode.window.showWarningMessage(
-                'No LM Studio models found.\n\nMake sure LM Studio is running and the API is reachable at http://localhost:12345.'
+                'No LM Studio models found.\n\nMake sure LM Studio is running and the API is reachable at http://localhost:1234.'
             );
             return;
         }
@@ -138,13 +138,13 @@ function normalizeApiBase(value: string): string {
 
 function getConfiguredApiBase(): string {
     const config = vscode.workspace.getConfiguration('lmstudio');
-    return config.get<string>('apiBase') || 'http://localhost:12345';
+    return config.get<string>('apiBase') || 'http://localhost:1234';
 }
 
 function validateApiBase(value: string): string | undefined {
     const trimmed = value.trim();
     if (!trimmed) {
-        return 'Enter a URL like http://localhost:12345';
+        return 'Enter a URL like http://localhost:1234';
     }
 
     try {
@@ -153,7 +153,7 @@ function validateApiBase(value: string): string | undefined {
             return 'Only http and https URLs are supported';
         }
     } catch {
-        return 'Enter a valid URL like http://localhost:12345';
+        return 'Enter a valid URL like http://localhost:1234';
     }
 
     return undefined;
@@ -194,7 +194,7 @@ function openConnectionPanel(context: vscode.ExtensionContext): void {
                 await testApiBaseFromPanel(connectionPanel, message.value);
                 break;
             case 'reset':
-                await saveApiBaseFromPanel(connectionPanel, 'http://localhost:12345');
+                await saveApiBaseFromPanel(connectionPanel, 'http://localhost:1234');
                 break;
             default:
                 break;
@@ -498,7 +498,7 @@ function getConnectionPanelHtml(webview: vscode.Webview, extensionUri: vscode.Ur
         <section class="card">
             <div class="field">
                 <label for="apiBase">Server URL</label>
-                <input id="apiBase" type="url" spellcheck="false" placeholder="http://localhost:12345" />
+                <input id="apiBase" type="url" spellcheck="false" placeholder="http://localhost:1234" />
                 <p>Use the LM Studio base URL. The extension will normalize trailing <code>/v1</code> automatically.</p>
             </div>
 
@@ -513,7 +513,7 @@ function getConnectionPanelHtml(webview: vscode.Webview, extensionUri: vscode.Ur
             <div class="meta">
                 <div class="meta-item">
                     <span class="meta-key">Configured URL</span>
-                    <span class="meta-value" id="configuredUrl">http://localhost:12345</span>
+                    <span class="meta-value" id="configuredUrl">http://localhost:1234</span>
                 </div>
                 <div class="meta-item">
                     <span class="meta-key">Saved in</span>
@@ -548,7 +548,7 @@ function getConnectionPanelHtml(webview: vscode.Webview, extensionUri: vscode.Ur
         });
 
         resetButton.addEventListener('click', () => {
-            input.value = 'http://localhost:12345';
+            input.value = 'http://localhost:1234';
             setStatus('neutral', 'Resetting to the default LM Studio URL...');
             vscode.postMessage({ type: 'reset' });
         });

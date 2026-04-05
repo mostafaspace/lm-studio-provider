@@ -124,7 +124,7 @@ export interface LMStudioModelDefinition {
 export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     private static readonly MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 
-    private apiBase = 'http://localhost:12345';
+    private apiBase = 'http://localhost:1234';
     private modelsCache: vscode.LanguageModelChatInformation[] = [];
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     private refreshInFlight: Promise<void> | undefined;
@@ -430,7 +430,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             return settingsUrl.replace(/\/v1\/?$/, '');
         }
 
-        return 'http://localhost:12345';
+        return 'http://localhost:1234';
     }
 
     private isChatModel(model: LMStudioApiModel): boolean {
