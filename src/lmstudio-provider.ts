@@ -55,6 +55,58 @@ interface LMStudioProviderConfiguration {
 }
 
 type LMStudioApiModel = LMStudioLegacyApiModel | LMStudioCurrentApiModel;
+type OpenAIRole = 'assistant' | 'system' | 'tool' | 'user';
+
+interface OpenAIChatCompletionToolCall {
+    id?: string;
+    type?: 'function';
+    function?: {
+        name?: string;
+        arguments?: string;
+    };
+}
+
+interface OpenAIChatCompletionMessage {
+    role: OpenAIRole;
+    content?: string | null;
+    name?: string;
+    tool_call_id?: string;
+    tool_calls?: OpenAIChatCompletionToolCall[];
+}
+
+interface OpenAIChatCompletionToolDefinition {
+    type: 'function';
+    function: {
+        name: string;
+        description: string;
+        parameters: object;
+    };
+}
+
+type OpenAIChatCompletionToolChoice =
+    | 'auto'
+    | 'required';
+
+interface OpenAIChatCompletionResponse {
+    choices?: Array<{
+        message?: {
+            content?: string | null;
+            reasoning_content?: string | null;
+            tool_calls?: OpenAIChatCompletionToolCall[];
+        };
+    }>;
+}
+
+interface ParsedToolCall {
+    callId: string;
+    name: string;
+    input: object;
+}
+
+interface ParsedToolCallCollection {
+    toolCalls: ParsedToolCall[];
+    consumedContent: boolean;
+}
 
 export interface LMStudioModelDefinition {
     id: string;
@@ -137,65 +189,12 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             this.apiBase = this.resolveApiBase(options.modelConfiguration);
 
             const convertedMessages = this.convertMessages(messages);
-            const controller = new AbortController();
-            token.onCancellationRequested(() => controller.abort());
-
-            const response = await fetch(`${this.apiBase}/v1/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    model: model.id,
-                    messages: convertedMessages,
-                    stream: true,
-                    temperature: 0.7,
-                    max_tokens: 2000
-                }),
-                signal: controller.signal
-            });
-
-            if (!response.ok || !response.body) {
-                throw new Error(`LM Studio API error: ${response.status} ${response.statusText}`);
+            if (this.shouldUseToolCallingRequest(options)) {
+                await this.provideToolCallingResponse(model, convertedMessages, options, progress, token);
+                return;
             }
 
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            try {
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) {
-                        break;
-                    }
-
-                    const chunk = decoder.decode(value);
-                    const lines = chunk.split('\n');
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) {
-                            continue;
-                        }
-
-                        const data = line.slice(6);
-                        if (data === '[DONE]') {
-                            continue;
-                        }
-
-                        try {
-                            const parsed = JSON.parse(data);
-                            const content = parsed.choices?.[0]?.delta?.content;
-                            if (content) {
-                                progress.report(new vscode.LanguageModelTextPart(content));
-                            }
-                        } catch {
-                            // Ignore partial stream frames that are not valid JSON on their own.
-                        }
-                    }
-                }
-            } finally {
-                reader.releaseLock();
-            }
+            await this.provideStreamingTextResponse(model, convertedMessages, progress, token);
         } catch (error) {
             throw new Error(`Failed to get response from LM Studio: ${error}`);
         }
@@ -208,6 +207,123 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     ): Promise<number> {
         const value = typeof text === 'string' ? text : this.getMessageText(text);
         return Math.ceil(value.length / 4);
+    }
+
+    private async provideStreamingTextResponse(
+        model: vscode.LanguageModelChatInformation,
+        messages: OpenAIChatCompletionMessage[],
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+        token: vscode.CancellationToken
+    ): Promise<void> {
+        const controller = new AbortController();
+        token.onCancellationRequested(() => controller.abort());
+
+        const response = await fetch(`${this.apiBase}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: model.id,
+                messages,
+                stream: true,
+                temperature: 0.7,
+                max_tokens: 2000
+            }),
+            signal: controller.signal
+        });
+
+        if (!response.ok || !response.body) {
+            throw new Error(`LM Studio API error: ${response.status} ${response.statusText}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) {
+                        continue;
+                    }
+
+                    const data = line.slice(6).trim();
+                    if (!data || data === '[DONE]') {
+                        continue;
+                    }
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        const content = parsed.choices?.[0]?.delta?.content;
+                        if (content) {
+                            progress.report(new vscode.LanguageModelTextPart(content));
+                        }
+                    } catch {
+                        // Ignore partial stream frames that are not valid JSON on their own.
+                    }
+                }
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    private async provideToolCallingResponse(
+        model: vscode.LanguageModelChatInformation,
+        messages: OpenAIChatCompletionMessage[],
+        options: vscode.ProvideLanguageModelChatResponseOptions,
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+        token: vscode.CancellationToken
+    ): Promise<void> {
+        const controller = new AbortController();
+        token.onCancellationRequested(() => controller.abort());
+
+        const response = await fetch(`${this.apiBase}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: model.id,
+                messages,
+                stream: false,
+                temperature: 0.7,
+                max_tokens: 2000,
+                tools: this.convertTools(options.tools ?? []),
+                tool_choice: this.convertToolChoice(options.toolMode)
+            }),
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            throw new Error(`LM Studio API error: ${response.status} ${response.statusText}`);
+        }
+
+        const payload = await response.json() as OpenAIChatCompletionResponse;
+        const message = payload.choices?.[0]?.message;
+        if (!message) {
+            return;
+        }
+
+        const parsedToolCalls = this.extractToolCalls(message);
+        for (const toolCall of parsedToolCalls.toolCalls) {
+            progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
+        }
+
+        const content = this.getVisibleAssistantContent(message, parsedToolCalls.consumedContent);
+        if (content) {
+            progress.report(new vscode.LanguageModelTextPart(content));
+        }
     }
 
     private async refreshModels(): Promise<void> {
@@ -401,11 +517,104 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         return model.type === 'vlm';
     }
 
-    private convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]) {
-        return messages.map(message => ({
-            role: this.toOpenAIRole(message.role),
-            content: this.getMessageText(message)
+    private shouldUseToolCallingRequest(options: vscode.ProvideLanguageModelChatResponseOptions): boolean {
+        return !!options.tools?.length;
+    }
+
+    private convertTools(tools: readonly vscode.LanguageModelChatTool[]): OpenAIChatCompletionToolDefinition[] {
+        return tools.map(tool => ({
+            type: 'function',
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema ?? {
+                    type: 'object',
+                    properties: {}
+                }
+            }
         }));
+    }
+
+    private convertToolChoice(toolMode: vscode.LanguageModelChatToolMode): OpenAIChatCompletionToolChoice {
+        if (toolMode === vscode.LanguageModelChatToolMode.Required) {
+            return 'required';
+        }
+
+        return 'auto';
+    }
+
+    private convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): OpenAIChatCompletionMessage[] {
+        const converted: OpenAIChatCompletionMessage[] = [];
+
+        for (const message of messages) {
+            const textParts: string[] = [];
+            const assistantToolCalls: OpenAIChatCompletionToolCall[] = [];
+
+            for (const part of message.content) {
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    textParts.push(part.value);
+                    continue;
+                }
+
+                if (typeof part === 'string') {
+                    textParts.push(part);
+                    continue;
+                }
+
+                if (part instanceof vscode.LanguageModelToolCallPart && message.role === vscode.LanguageModelChatMessageRole.Assistant) {
+                    assistantToolCalls.push({
+                        id: part.callId,
+                        type: 'function',
+                        function: {
+                            name: part.name,
+                            arguments: JSON.stringify(part.input ?? {})
+                        }
+                    });
+                    continue;
+                }
+
+                if (part instanceof vscode.LanguageModelToolResultPart && message.role === vscode.LanguageModelChatMessageRole.User) {
+                    const pendingText = this.joinTextParts(textParts);
+                    if (pendingText) {
+                        converted.push({
+                            role: 'user',
+                            content: pendingText,
+                            name: message.name
+                        });
+                        textParts.length = 0;
+                    }
+
+                    converted.push({
+                        role: 'tool',
+                        content: this.getToolResultText(part),
+                        tool_call_id: part.callId
+                    });
+                }
+            }
+
+            if (assistantToolCalls.length > 0) {
+                converted.push({
+                    role: 'assistant',
+                    content: this.joinTextParts(textParts),
+                    name: message.name,
+                    tool_calls: assistantToolCalls
+                });
+                continue;
+            }
+
+            const content = this.joinTextParts(textParts);
+            if (!content) {
+                continue;
+            }
+
+            converted.push({
+                role: this.toOpenAIRole(message.role),
+                content,
+                name: message.name
+            });
+        }
+
+        return converted;
     }
 
     private getMessageText(message: vscode.LanguageModelChatRequestMessage): string {
@@ -424,7 +633,244 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             .join('');
     }
 
-    private toOpenAIRole(role: vscode.LanguageModelChatMessageRole): 'assistant' | 'system' | 'user' {
+    private getToolResultText(part: vscode.LanguageModelToolResultPart): string {
+        return part.content
+            .map(item => {
+                if (item instanceof vscode.LanguageModelTextPart) {
+                    return item.value;
+                }
+
+                if (typeof item === 'string') {
+                    return item;
+                }
+
+                if (typeof item === 'object' && item !== null) {
+                    try {
+                        return JSON.stringify(item);
+                    } catch {
+                        return '';
+                    }
+                }
+
+                return '';
+            })
+            .join('');
+    }
+
+    private parseToolCallInput(rawArguments: string | undefined): object {
+        if (!rawArguments?.trim()) {
+            return {};
+        }
+
+        try {
+            const parsed = JSON.parse(rawArguments);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed;
+            }
+
+            return { value: parsed };
+        } catch (error) {
+            console.warn('Failed to parse LM Studio tool-call arguments:', error);
+            return { raw: rawArguments };
+        }
+    }
+
+    private getOpenAIMessageText(content: string | null | undefined): string {
+        return typeof content === 'string' ? content : '';
+    }
+
+    private extractToolCalls(message: { content?: string | null; reasoning_content?: string | null; tool_calls?: OpenAIChatCompletionToolCall[] }): ParsedToolCallCollection {
+        const structuredCalls = this.parseStructuredToolCalls(message.tool_calls ?? []);
+        if (structuredCalls.length > 0) {
+            return {
+                toolCalls: structuredCalls,
+                consumedContent: false
+            };
+        }
+
+        const contentToolCalls = this.parseToolCallsFromText(message.content, 'content_tool_call');
+        if (contentToolCalls.toolCalls.length > 0) {
+            return contentToolCalls;
+        }
+
+        const reasoningToolCalls = this.parseToolCallsFromText(message.reasoning_content, 'reasoning_tool_call');
+        if (reasoningToolCalls.toolCalls.length > 0) {
+            return reasoningToolCalls;
+        }
+
+        return {
+            toolCalls: [],
+            consumedContent: false
+        };
+    }
+
+    private parseStructuredToolCalls(toolCalls: OpenAIChatCompletionToolCall[]): ParsedToolCall[] {
+        return toolCalls
+            .map((toolCall, index) => {
+                const name = toolCall.function?.name?.trim();
+                if (!name) {
+                    return undefined;
+                }
+
+                return {
+                    callId: toolCall.id ?? `tool_call_${index + 1}`,
+                    name,
+                    input: this.parseToolCallInput(toolCall.function?.arguments)
+                };
+            })
+            .filter((toolCall): toolCall is ParsedToolCall => !!toolCall);
+    }
+
+    private parseToolCallsFromText(rawText: string | null | undefined, callIdPrefix: string): ParsedToolCallCollection {
+        const text = this.getOpenAIMessageText(rawText);
+        if (!text) {
+            return {
+                toolCalls: [],
+                consumedContent: false
+            };
+        }
+
+        const xmlMatches = [...text.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/g)];
+        const toolCalls: ParsedToolCall[] = [];
+        let consumedContent = false;
+
+        for (let index = 0; index < xmlMatches.length; index += 1) {
+            const parsed = this.parseSingleToolCallBlock(xmlMatches[index][1], `${callIdPrefix}_${index + 1}`);
+            if (parsed) {
+                toolCalls.push(parsed);
+            }
+        }
+
+        if (toolCalls.length > 0) {
+            consumedContent = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim().length === 0;
+            return {
+                toolCalls,
+                consumedContent
+            };
+        }
+
+        const jsonToolCall = this.parseStandaloneJsonToolCall(text, `${callIdPrefix}_1`);
+        if (jsonToolCall) {
+            return {
+                toolCalls: [jsonToolCall],
+                consumedContent: true
+            };
+        }
+
+        return {
+            toolCalls: [],
+            consumedContent: false
+        };
+    }
+
+    private parseSingleToolCallBlock(block: string, callId: string): ParsedToolCall | undefined {
+        const trimmedBlock = block.trim();
+        const jsonToolCall = this.parseStandaloneJsonToolCall(trimmedBlock, callId);
+        if (jsonToolCall) {
+            return jsonToolCall;
+        }
+
+        const xmlFunctionMatch = trimmedBlock.match(/<function=([^>\s]+)>([\s\S]*?)<\/function>/);
+        if (!xmlFunctionMatch) {
+            return undefined;
+        }
+
+        const name = xmlFunctionMatch[1].trim();
+        if (!name) {
+            return undefined;
+        }
+
+        const input: Record<string, unknown> = {};
+        const parameterMatches = [...xmlFunctionMatch[2].matchAll(/<parameter=([^>\s]+)>([\s\S]*?)<\/parameter>/g)];
+        for (const parameterMatch of parameterMatches) {
+            const parameterName = parameterMatch[1].trim();
+            if (!parameterName) {
+                continue;
+            }
+
+            input[parameterName] = this.parseLooseValue(parameterMatch[2].trim());
+        }
+
+        return {
+            callId,
+            name,
+            input
+        };
+    }
+
+    private parseStandaloneJsonToolCall(rawText: string, callId: string): ParsedToolCall | undefined {
+        try {
+            const parsed = JSON.parse(rawText);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                return undefined;
+            }
+
+            const candidate = parsed as { name?: unknown; toolName?: unknown; arguments?: unknown; input?: unknown };
+            const name = typeof candidate.name === 'string'
+                ? candidate.name
+                : typeof candidate.toolName === 'string'
+                    ? candidate.toolName
+                    : undefined;
+
+            if (!name) {
+                return undefined;
+            }
+
+            return {
+                callId,
+                name,
+                input: this.normalizeToolCallInput(candidate.arguments ?? candidate.input ?? {})
+            };
+        } catch {
+            return undefined;
+        }
+    }
+
+    private normalizeToolCallInput(input: unknown): object {
+        if (!input) {
+            return {};
+        }
+
+        if (typeof input === 'string') {
+            return this.parseToolCallInput(input);
+        }
+
+        if (typeof input === 'object' && !Array.isArray(input)) {
+            return input;
+        }
+
+        return { value: input };
+    }
+
+    private parseLooseValue(value: string): unknown {
+        if (!value) {
+            return '';
+        }
+
+        try {
+            return JSON.parse(value);
+        } catch {
+            return value;
+        }
+    }
+
+    private getVisibleAssistantContent(
+        message: { content?: string | null; reasoning_content?: string | null },
+        consumedContent: boolean
+    ): string {
+        if (consumedContent) {
+            return '';
+        }
+
+        return this.getOpenAIMessageText(message.content);
+    }
+
+    private joinTextParts(parts: string[]): string | null {
+        const combined = parts.join('');
+        return combined.length > 0 ? combined : null;
+    }
+
+    private toOpenAIRole(role: vscode.LanguageModelChatMessageRole): Exclude<OpenAIRole, 'tool'> {
         switch (role) {
             case vscode.LanguageModelChatMessageRole.Assistant:
                 return 'assistant';
