@@ -65,6 +65,8 @@ If you changed the extension manifest or installed a new `.vsix`, fully restart 
 - `LM Studio: Test Available Models`
 - `LM Studio: Connection Settings`
 
+The `Manage LM Studio...` button in VS Code model management opens the same connection settings panel.
+
 ## Troubleshooting
 
 ### Check the LM Studio API

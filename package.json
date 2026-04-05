@@ -27,7 +27,7 @@
       {
         "vendor": "lmstudio",
         "displayName": "LM Studio",
-        "managementCommand": "lmstudio.diagnose"
+        "managementCommand": "lmstudio.setApiBase"
       }
     ],
     "commands": [
