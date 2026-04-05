@@ -96,7 +96,39 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showInformationMessage(`Found ${models.length} LM Studio models:\n\n${modelList}`);
     });
 
-    context.subscriptions.push(diagnosticCommand, testCommand);
+    const setApiBaseCommand = vscode.commands.registerCommand('lmstudio.setApiBase', async () => {
+        const config = vscode.workspace.getConfiguration('lmstudio');
+        const currentUrl = config.get<string>('apiBase') || 'http://localhost:12345';
+
+        const nextUrl = await vscode.window.showInputBox({
+            title: 'LM Studio Server URL',
+            prompt: 'Enter the LM Studio base URL',
+            value: currentUrl,
+            placeHolder: 'http://localhost:12345',
+            ignoreFocusOut: true,
+            validateInput: value => validateApiBase(value)
+        });
+
+        if (!nextUrl) {
+            return;
+        }
+
+        const normalizedUrl = normalizeApiBase(nextUrl);
+        await config.update('apiBase', normalizedUrl, vscode.ConfigurationTarget.Global);
+        lmStudioProvider?.forceRefresh();
+        void vscode.window.showInformationMessage(`LM Studio server URL set to ${normalizedUrl}`);
+    });
+
+    const configurationListener = vscode.workspace.onDidChangeConfiguration(event => {
+        if (!event.affectsConfiguration('lmstudio.apiBase')) {
+            return;
+        }
+
+        console.log('LM Studio API base changed, refreshing models');
+        lmStudioProvider?.forceRefresh();
+    });
+
+    context.subscriptions.push(diagnosticCommand, testCommand, setApiBaseCommand, configurationListener);
     console.log('LM Studio Provider initialized');
 }
 
@@ -116,4 +148,26 @@ function formatModelDiagnostic(model: vscode.LanguageModelChatInformation): stri
 
 function formatRegisteredModelDiagnostic(model: vscode.LanguageModelChat): string {
     return `${model.id} | family ${model.family} | input ${model.maxInputTokens}`;
+}
+
+function normalizeApiBase(value: string): string {
+    return value.trim().replace(/\/+$/, '').replace(/\/v1\/?$/, '');
+}
+
+function validateApiBase(value: string): string | undefined {
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return 'Enter a URL like http://localhost:12345';
+    }
+
+    try {
+        const parsed = new URL(trimmed);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return 'Only http and https URLs are supported';
+        }
+    } catch {
+        return 'Enter a valid URL like http://localhost:12345';
+    }
+
+    return undefined;
 }

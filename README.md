@@ -63,6 +63,7 @@ If you changed the extension manifest or installed a new `.vsix`, fully restart 
 
 - `LM Studio: Run Diagnostics`
 - `LM Studio: Test Available Models`
+- `LM Studio: Set Server URL`
 
 ## Troubleshooting
 

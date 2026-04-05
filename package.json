@@ -38,6 +38,10 @@
       {
         "command": "lmstudio.diagnose",
         "title": "LM Studio: Run Diagnostics"
+      },
+      {
+        "command": "lmstudio.setApiBase",
+        "title": "LM Studio: Set Server URL"
       }
     ],
     "configuration": {
