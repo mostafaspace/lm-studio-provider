@@ -24,11 +24,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     const diagnosticCommand = vscode.commands.registerCommand('lmstudio.diagnose', async () => {
         console.log('Running diagnostics');
+        const config = vscode.workspace.getConfiguration('lmstudio');
+        const experimentalAgentMode = config.get<boolean>('enableExperimentalAgentMode', false);
+        const requestTimeoutSeconds = config.get<number>('requestTimeoutSeconds', 120);
 
         const diagnostics: string[] = [];
         diagnostics.push('=== LM Studio Provider Diagnostics ===\n');
         diagnostics.push('1. Extension Status: ACTIVE\n');
-        diagnostics.push('2. Fetching models from LM Studio...');
+        diagnostics.push(`2. Configuration: agent mode ${experimentalAgentMode ? 'ENABLED' : 'DISABLED'} | timeout ${requestTimeoutSeconds}s\n`);
+        diagnostics.push('3. Fetching models from LM Studio...');
 
         try {
             const tokenSource = new vscode.CancellationTokenSource();
@@ -52,7 +56,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         diagnostics.push('');
-        diagnostics.push('3. Provider Status: registered as LM Studio');
+        diagnostics.push('4. Provider Status: registered as LM Studio');
 
         try {
             const registeredModels = await vscode.lm.selectChatModels({ vendor: 'lmstudio' });
@@ -65,8 +69,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         diagnostics.push('');
-        diagnostics.push('4. Expected Result');
-        diagnostics.push('   If the models above show tools enabled, they should appear in the Copilot Chat agent-mode picker after a full VS Code restart.');
+        diagnostics.push('5. Expected Result');
+        if (experimentalAgentMode) {
+            diagnostics.push('   Tool-capable LM Studio models should appear in the Copilot Chat agent-mode picker after a full VS Code restart.');
+        } else {
+            diagnostics.push('   LM Studio models stay available for normal chat. Enable lmstudio.enableExperimentalAgentMode if you want them to appear in agent/autopilot mode.');
+        }
 
         const outputChannel = vscode.window.createOutputChannel('LM Studio Diagnostics');
         outputChannel.clear();
@@ -102,11 +110,15 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const configurationListener = vscode.workspace.onDidChangeConfiguration(event => {
-        if (!event.affectsConfiguration('lmstudio.apiBase')) {
+        if (
+            !event.affectsConfiguration('lmstudio.apiBase') &&
+            !event.affectsConfiguration('lmstudio.enableExperimentalAgentMode') &&
+            !event.affectsConfiguration('lmstudio.requestTimeoutSeconds')
+        ) {
             return;
         }
 
-        console.log('LM Studio API base changed, refreshing models');
+        console.log('LM Studio configuration changed, refreshing models');
         lmStudioProvider?.forceRefresh();
     });
 

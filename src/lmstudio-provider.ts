@@ -123,6 +123,7 @@ export interface LMStudioModelDefinition {
 
 export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     private static readonly MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+    private static readonly DEFAULT_REQUEST_TIMEOUT_MS = 120 * 1000;
 
     private apiBase = 'http://localhost:1234';
     private modelsCache: vscode.LanguageModelChatInformation[] = [];
@@ -183,6 +184,12 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         try {
             this.apiBase = this.resolveApiBase(options.modelConfiguration);
 
+            if (options.tools?.length && !model.capabilities.toolCalling) {
+                throw new Error(
+                    'LM Studio agent mode is disabled for this model. Enable lmstudio.enableExperimentalAgentMode to opt in to local tool calling.'
+                );
+            }
+
             const convertedMessages = this.convertMessages(messages);
             if (this.shouldUseToolCallingRequest(options)) {
                 await this.provideToolCallingResponse(model, convertedMessages, options, progress, token);
@@ -210,8 +217,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         token: vscode.CancellationToken
     ): Promise<void> {
-        const controller = new AbortController();
-        token.onCancellationRequested(() => controller.abort());
+        const request = this.createAbortController(token);
 
         const response = await fetch(`${this.apiBase}/v1/chat/completions`, {
             method: 'POST',
@@ -225,7 +231,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 temperature: 0.7,
                 max_tokens: 2000
             }),
-            signal: controller.signal
+            signal: request.controller.signal
         });
 
         if (!response.ok || !response.body) {
@@ -269,6 +275,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 }
             }
         } finally {
+            request.dispose();
             reader.releaseLock();
         }
     }
@@ -280,8 +287,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         token: vscode.CancellationToken
     ): Promise<void> {
-        const controller = new AbortController();
-        token.onCancellationRequested(() => controller.abort());
+        const request = this.createAbortController(token);
 
         const response = await fetch(`${this.apiBase}/v1/chat/completions`, {
             method: 'POST',
@@ -291,37 +297,121 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             body: JSON.stringify({
                 model: model.id,
                 messages: this.addToolCallingSystemPrompt(messages),
-                stream: false,
-                temperature: 0.7,
+                stream: true,
+                temperature: 0,
                 max_tokens: 2000,
                 tools: this.convertTools(options.tools ?? []),
                 tool_choice: this.convertToolChoice(options.toolMode)
             }),
-            signal: controller.signal
+            signal: request.controller.signal
         });
 
-        if (!response.ok) {
+        if (!response.ok || !response.body) {
             throw new Error(`LM Studio API error: ${response.status} ${response.statusText}`);
         }
 
-        const payload = await response.json() as OpenAIChatCompletionResponse;
-        const message = payload.choices?.[0]?.message;
-        if (!message) {
-            return;
-        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        const parsedToolCalls = this.extractToolCalls(message);
-        for (const toolCall of parsedToolCalls.toolCalls) {
-            progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
-        }
+        const streamedNativeToolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
+        let fullContent = '';
+        let fullReasoning = '';
+        let lastReportTime = Date.now();
 
-        const content = this.getVisibleAssistantContent(
-            message,
-            parsedToolCalls.consumedContent,
-            parsedToolCalls.visibleContent
-        );
-        if (content) {
-            progress.report(new vscode.LanguageModelTextPart(content));
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+
+                let hasReported = false;
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) {
+                        continue;
+                    }
+
+                    const data = line.slice(6).trim();
+                    if (!data || data === '[DONE]') {
+                        continue;
+                    }
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        const delta = parsed.choices?.[0]?.delta;
+                        if (!delta) {
+                            continue;
+                        }
+
+                        if (delta.content) {
+                            fullContent += delta.content;
+                            progress.report(new vscode.LanguageModelTextPart(delta.content));
+                            hasReported = true;
+                        }
+
+                        if (delta.reasoning_content) {
+                            fullReasoning += delta.reasoning_content;
+                        }
+
+                        if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+                            for (const tc of delta.tool_calls) {
+                                const index = tc.index;
+                                if (!streamedNativeToolCalls.has(index)) {
+                                    streamedNativeToolCalls.set(index, {
+                                        id: tc.id ?? '',
+                                        name: tc.function?.name ?? '',
+                                        arguments: tc.function?.arguments ?? ''
+                                    });
+                                } else {
+                                    const existing = streamedNativeToolCalls.get(index)!;
+                                    if (tc.id) existing.id += tc.id;
+                                    if (tc.function?.name) existing.name += tc.function.name;
+                                    if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+                                }
+                            }
+                        }
+                    } catch {
+                        // Ignore partial JSON
+                    }
+                }
+
+                if (!hasReported && Date.now() - lastReportTime > 5000) {
+                    progress.report(new vscode.LanguageModelTextPart(''));
+                    lastReportTime = Date.now();
+                } else if (hasReported) {
+                    lastReportTime = Date.now();
+                }
+            }
+
+            const nativeToolCalls = Array.from(streamedNativeToolCalls.values());
+            if (nativeToolCalls.length > 0) {
+                const parsedNative = this.parseStructuredToolCalls(nativeToolCalls.map(tc => ({
+                    id: tc.id,
+                    type: 'function',
+                    function: {
+                        name: tc.name,
+                        arguments: tc.arguments
+                    }
+                })));
+
+                for (const toolCall of parsedNative) {
+                    progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
+                }
+            } else {
+                const parsedToolCalls = this.extractToolCalls({ content: fullContent, reasoning_content: fullReasoning });
+                for (const toolCall of parsedToolCalls.toolCalls) {
+                    progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
+                }
+            }
+        } finally {
+            request.dispose();
+            reader.releaseLock();
         }
     }
 
@@ -500,14 +590,19 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     private supportsToolCalling(model: LMStudioApiModel): boolean {
+        if (!this.isExperimentalAgentModeEnabled()) {
+            return false;
+        }
+
         if ('capabilities' in model && Array.isArray(model.capabilities)) {
             return model.capabilities.includes('tool_use');
         }
 
-        // VS Code gates agent-mode visibility on toolCalling. LM Studio's current
-        // metadata reports training hints rather than transport support, so expose
-        // chat-capable LLMs as tool-capable to keep them selectable.
-        return this.isChatModel(model);
+        if ('capabilities' in model && !Array.isArray(model.capabilities)) {
+            return !!model.capabilities?.trained_for_tool_use;
+        }
+
+        return false;
     }
 
     private supportsVision(model: LMStudioApiModel): boolean {
@@ -819,6 +914,7 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
                 'When tools are available, never print tool calls as JSON, XML, markdown code fences, or pseudocode.',
                 'If a tool is needed, call it directly.',
                 'Do not narrate the tool call or restate its arguments.',
+                'Never repeat the same tool call after a tool result unless the previous result explicitly says to retry.',
                 'If you include user-visible text in the same turn, keep it to a single brief sentence.'
             ].join(' ')
         };
@@ -956,6 +1052,35 @@ export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
             default:
                 return 'system';
         }
+    }
+
+    private isExperimentalAgentModeEnabled(): boolean {
+        const config = vscode.workspace.getConfiguration('lmstudio');
+        return config.get<boolean>('enableExperimentalAgentMode', false);
+    }
+
+    private getRequestTimeoutMs(): number {
+        const config = vscode.workspace.getConfiguration('lmstudio');
+        const configuredSeconds = config.get<number>('requestTimeoutSeconds');
+        if (typeof configuredSeconds === 'number' && Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
+            return Math.max(5, configuredSeconds) * 1000;
+        }
+
+        return LMStudioChatProvider.DEFAULT_REQUEST_TIMEOUT_MS;
+    }
+
+    private createAbortController(token: vscode.CancellationToken): { controller: AbortController; dispose: () => void } {
+        const controller = new AbortController();
+        const timeoutHandle = setTimeout(() => controller.abort(), this.getRequestTimeoutMs());
+        const cancellationSubscription = token.onCancellationRequested(() => controller.abort());
+
+        return {
+            controller,
+            dispose: () => {
+                clearTimeout(timeoutHandle);
+                cancellationSubscription.dispose();
+            }
+        };
     }
 
     private getModelFamily(modelId: string, model: LMStudioApiModel): string {

@@ -51,6 +51,17 @@
           "type": "string",
           "default": "http://localhost:1234",
           "description": "The base URL of the LM Studio API server"
+        },
+        "lmstudio.enableExperimentalAgentMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Expose LM Studio models in agent/autopilot mode with tool calling. Disabled by default because local runtimes can loop or stall on agent turns."
+        },
+        "lmstudio.requestTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "description": "Abort LM Studio chat requests after this many seconds if the local runtime stalls."
         }
       }
     }

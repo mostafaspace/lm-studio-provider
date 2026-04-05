@@ -46,9 +46,13 @@ Set the LM Studio base URL in your VS Code settings if you are not using the def
 
 ```json
 {
-  "lmstudio.apiBase": "http://localhost:1234"
+  "lmstudio.apiBase": "http://localhost:1234",
+  "lmstudio.enableExperimentalAgentMode": false,
+  "lmstudio.requestTimeoutSeconds": 120
 }
 ```
+
+`lmstudio.enableExperimentalAgentMode` is off by default. This keeps LM Studio models available for normal chat, but hides them from agent/autopilot mode unless you explicitly opt in. Local runtimes like LM Studio and Ollama can loop, unload, or stall during tool-heavy agent turns, so the extension now treats agent mode as experimental.
 
 ## Usage
 
@@ -56,6 +60,8 @@ Set the LM Studio base URL in your VS Code settings if you are not using the def
 2. Make sure the LM Studio local server is enabled.
 3. Open VS Code with this extension installed.
 4. Open chat and pick an LM Studio model from the model selector.
+
+For normal chat, nothing else is required. If you want LM Studio models to appear in agent/autopilot mode too, enable `lmstudio.enableExperimentalAgentMode` and fully restart VS Code.
 
 If you changed the extension manifest or installed a new `.vsix`, fully restart VS Code instead of using `Reload Window`.
 
@@ -91,6 +97,12 @@ Use `LM Studio: Run Diagnostics` from the Command Palette. The output shows:
 - Confirm you restarted VS Code after installing or updating the extension.
 - Confirm the diagnostics command lists the expected models.
 - If diagnostics finds models but the picker does not update, close all VS Code windows and launch VS Code again.
+
+### Agent mode loops or gets stuck
+
+- Leave `lmstudio.enableExperimentalAgentMode` off unless you specifically want to test local tool calling.
+- If you do enable it, prefer models that report tool-use capability in LM Studio and keep `lmstudio.requestTimeoutSeconds` high enough for your hardware.
+- If LM Studio or Ollama repeatedly loops in agent/autopilot mode, switch back to normal chat for local models. This is usually a local runtime/tool-calling limitation, not a connection problem.
 
 ## Development
 
