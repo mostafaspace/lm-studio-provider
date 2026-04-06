@@ -52,6 +52,8 @@ Set the LM Studio base URL in your VS Code settings if you are not using the def
 }
 ```
 
+`http://localhost:1234` is the built-in default. If you use a different host, IP, or port such as `http://localhost:12345`, set `lmstudio.apiBase` directly or use `LM Studio: Connection Settings` and the extension will use that saved value.
+
 `lmstudio.enableExperimentalAgentMode` is off by default. This keeps LM Studio models available for normal chat, but hides them from agent/autopilot mode unless you explicitly opt in. Local runtimes like LM Studio and Ollama can loop, unload, or stall during tool-heavy agent turns, so the extension now treats agent mode as experimental.
 
 ## Usage

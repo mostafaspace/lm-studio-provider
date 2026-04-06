@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { LMStudioChatProvider } from './lmstudio-provider';
 
+const DEFAULT_API_BASE = 'http://localhost:1234';
+
 let lmStudioProvider: LMStudioChatProvider | undefined;
 let connectionPanel: vscode.WebviewPanel | undefined;
 
@@ -25,13 +27,14 @@ export function activate(context: vscode.ExtensionContext) {
     const diagnosticCommand = vscode.commands.registerCommand('lmstudio.diagnose', async () => {
         console.log('Running diagnostics');
         const config = vscode.workspace.getConfiguration('lmstudio');
+        const configuredApiBase = getConfiguredApiBase();
         const experimentalAgentMode = config.get<boolean>('enableExperimentalAgentMode', false);
         const requestTimeoutSeconds = config.get<number>('requestTimeoutSeconds', 120);
 
         const diagnostics: string[] = [];
         diagnostics.push('=== LM Studio Provider Diagnostics ===\n');
         diagnostics.push('1. Extension Status: ACTIVE\n');
-        diagnostics.push(`2. Configuration: agent mode ${experimentalAgentMode ? 'ENABLED' : 'DISABLED'} | timeout ${requestTimeoutSeconds}s\n`);
+        diagnostics.push(`2. Configuration: ${configuredApiBase} | agent mode ${experimentalAgentMode ? 'ENABLED' : 'DISABLED'} | timeout ${requestTimeoutSeconds}s\n`);
         diagnostics.push('3. Fetching models from LM Studio...');
 
         try {
@@ -49,7 +52,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } else {
                 diagnostics.push('   No chat models found');
-                diagnostics.push('   Check that LM Studio is running at http://localhost:1234');
+                diagnostics.push(`   Check that LM Studio is running at ${configuredApiBase}`);
             }
         } catch (error) {
             diagnostics.push(`   Error: ${error}`);
@@ -96,7 +99,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (!models || models.length === 0) {
             void vscode.window.showWarningMessage(
-                'No LM Studio models found.\n\nMake sure LM Studio is running and the API is reachable at http://localhost:1234.'
+                `No LM Studio models found.\n\nMake sure LM Studio is running and the API is reachable at ${getConfiguredApiBase()}.`
             );
             return;
         }
@@ -151,7 +154,7 @@ function normalizeApiBase(value: string): string {
 
 function getConfiguredApiBase(): string {
     const config = vscode.workspace.getConfiguration('lmstudio');
-    return config.get<string>('apiBase') || 'http://localhost:1234';
+    return config.get<string>('apiBase') || DEFAULT_API_BASE;
 }
 
 function validateApiBase(value: string): string | undefined {

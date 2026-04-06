@@ -138,8 +138,9 @@ export interface LMStudioModelDefinition {
 export class LMStudioChatProvider implements vscode.LanguageModelChatProvider {
     private static readonly MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
     private static readonly DEFAULT_REQUEST_TIMEOUT_MS = 120 * 1000;
+    private static readonly DEFAULT_API_BASE = 'http://localhost:1234';
 
-    private apiBase = 'http://localhost:1234';
+    private apiBase = LMStudioChatProvider.DEFAULT_API_BASE;
     private modelsCache: vscode.LanguageModelChatInformation[] = [];
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     private refreshInFlight: Promise<void> | undefined;
@@ -565,38 +566,7 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
 
     private async fetchAvailableModels(apiBase: string): Promise<LMStudioApiModel[]> {
         this.apiBase = apiBase;
-
-        try {
-            console.log(`Fetching models from ${this.apiBase}/api/v1/models`);
-            const response = await fetch(`${this.apiBase}/api/v1/models`);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch API models: ${response.statusText}`);
-            }
-
-            const data = await response.json() as LMStudioLegacyApiModelsResponse | LMStudioCurrentApiModelsResponse;
-            const models = this.normalizeApiModelsResponse(data);
-            console.log(`Received ${models.length} models from LM Studio`);
-            return models;
-        } catch (error) {
-            console.warn('Falling back to OpenAI-compatible /v1/models:', error);
-        }
-
-        try {
-            const response = await fetch(`${this.apiBase}/v1/models`);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch OpenAI models: ${response.statusText}`);
-            }
-
-            const data = await response.json() as LMStudioOpenAIModelsResponse;
-            return (data.data || []).map(model => ({
-                id: model.id,
-                object: model.object,
-                max_context_length: 131072
-            }));
-        } catch (error) {
-            console.error('Error fetching models from LM Studio:', error);
-            return [];
-        }
+        return this.tryFetchAvailableModels(apiBase);
     }
 
     private normalizeApiModelsResponse(response: LMStudioLegacyApiModelsResponse | LMStudioCurrentApiModelsResponse): LMStudioApiModel[] {
@@ -623,7 +593,44 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
             return settingsUrl.replace(/\/v1\/?$/, '');
         }
 
-        return 'http://localhost:1234';
+        return LMStudioChatProvider.DEFAULT_API_BASE;
+    }
+
+    private async tryFetchAvailableModels(apiBase: string): Promise<LMStudioApiModel[]> {
+        try {
+            console.log(`Fetching models from ${apiBase}/api/v1/models`);
+            const response = await fetch(`${apiBase}/api/v1/models`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch API models: ${response.status} ${response.statusText}`);
+            }
+
+            const data = await response.json() as LMStudioLegacyApiModelsResponse | LMStudioCurrentApiModelsResponse;
+            const models = this.normalizeApiModelsResponse(data);
+            console.log(`Received ${models.length} models from LM Studio via ${apiBase}/api/v1/models`);
+            return models;
+        } catch (error) {
+            console.warn(`Failed ${apiBase}/api/v1/models, trying /v1/models instead:`, error);
+        }
+
+        try {
+            console.log(`Fetching models from ${apiBase}/v1/models`);
+            const response = await fetch(`${apiBase}/v1/models`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch OpenAI models: ${response.status} ${response.statusText}`);
+            }
+
+            const data = await response.json() as LMStudioOpenAIModelsResponse;
+            const models = (data.data || []).map(model => ({
+                id: model.id,
+                object: model.object,
+                max_context_length: 131072
+            }));
+            console.log(`Received ${models.length} models from LM Studio via ${apiBase}/v1/models`);
+            return models;
+        } catch (error) {
+            console.warn(`Failed ${apiBase}/v1/models:`, error);
+            return [];
+        }
     }
 
     private isChatModel(model: LMStudioApiModel): boolean {
