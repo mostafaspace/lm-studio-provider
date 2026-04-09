@@ -273,9 +273,7 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let startedReasoning = false;
-        let finishedReasoning = false;
-        let unparsedText = '';
+        const visibleTextFilter = this.createReasoningContentFilter();
 
         try {
             while (true) {
@@ -304,45 +302,27 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
                         if (!delta) {
                             continue;
                         }
-
                         if (delta.reasoning_content) {
-                            if (!startedReasoning) {
-                                progress.report(new vscode.LanguageModelTextPart('<details><summary>🧠 Thinking Process</summary>\n\n'));
-                                startedReasoning = true;
-                            }
-                            progress.report(new vscode.LanguageModelTextPart(delta.reasoning_content));
+                            // Keep reasoning private. The public provider API does not expose
+                            // the native collapsed thinking UI used by first-party models.
                         }
 
                         if (delta.content) {
-                            if (startedReasoning && !finishedReasoning) {
-                                progress.report(new vscode.LanguageModelTextPart('\n\n</details>\n\n'));
-                                finishedReasoning = true;
-                            }
-                            unparsedText += delta.content;
-                            let safeToYield = '';
-                            const lastLt = unparsedText.lastIndexOf('<');
-                            if (lastLt !== -1 && unparsedText.length - lastLt < 10) {
-                                safeToYield = unparsedText.substring(0, lastLt);
-                                unparsedText = unparsedText.substring(lastLt);
-                            } else {
-                                safeToYield = unparsedText;
-                                unparsedText = '';
-                            }
-                            if (safeToYield) {
-                                safeToYield = safeToYield.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
-                                safeToYield = safeToYield.replace(/<\/think>/g, '\n\n</details>\n\n');
-                                progress.report(new vscode.LanguageModelTextPart(safeToYield));
+                            const visibleText = visibleTextFilter.push(delta.content);
+                            if (visibleText) {
+                                progress.report(new vscode.LanguageModelTextPart(visibleText));
                             }
                         }
+
+                        continue;
                     } catch {
                         // Ignore partial stream frames that are not valid JSON on their own.
                     }
                 }
             }
-            if (unparsedText) {
-                unparsedText = unparsedText.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
-                unparsedText = unparsedText.replace(/<\/think>/g, '\n\n</details>\n\n');
-                progress.report(new vscode.LanguageModelTextPart(unparsedText));
+            const remainingVisibleText = visibleTextFilter.flush();
+            if (remainingVisibleText) {
+                progress.report(new vscode.LanguageModelTextPart(remainingVisibleText));
             }
         } finally {
             request.dispose();
@@ -389,9 +369,7 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
         let fullContent = '';
         let fullReasoning = '';
         let lastReportTime = Date.now();
-        let startedReasoning = false;
-        let finishedReasoning = false;
-        let unparsedText = '';
+        const visibleTextFilter = this.createReasoningContentFilter();
 
         try {
             while (true) {
@@ -422,39 +400,17 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
                         if (!delta) {
                             continue;
                         }
-
                         if (delta.reasoning_content) {
-                            if (!startedReasoning) {
-                                progress.report(new vscode.LanguageModelTextPart('<details><summary>🧠 Thinking Process</summary>\n\n'));
-                                startedReasoning = true;
-                            }
                             fullReasoning += delta.reasoning_content;
-                            progress.report(new vscode.LanguageModelTextPart(delta.reasoning_content));
-                            hasReported = true;
                         }
 
                         if (delta.content) {
-                            if (startedReasoning && !finishedReasoning) {
-                                progress.report(new vscode.LanguageModelTextPart('\n\n</details>\n\n'));
-                                finishedReasoning = true;
-                            }
                             fullContent += delta.content;
-                            unparsedText += delta.content;
-                            let safeToYield = '';
-                            const lastLt = unparsedText.lastIndexOf('<');
-                            if (lastLt !== -1 && unparsedText.length - lastLt < 10) {
-                                safeToYield = unparsedText.substring(0, lastLt);
-                                unparsedText = unparsedText.substring(lastLt);
-                            } else {
-                                safeToYield = unparsedText;
-                                unparsedText = '';
+                            const visibleText = visibleTextFilter.push(delta.content);
+                            if (visibleText) {
+                                progress.report(new vscode.LanguageModelTextPart(visibleText));
+                                hasReported = true;
                             }
-                            if (safeToYield) {
-                                safeToYield = safeToYield.replace(/<think>/g, '\n\n<details><summary>🧠 Thinking Process</summary>\n\n');
-                                safeToYield = safeToYield.replace(/<\/think>/g, '\n\n</details>\n\n');
-                                progress.report(new vscode.LanguageModelTextPart(safeToYield));
-                            }
-                            hasReported = true;
                         }
 
                         if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
@@ -474,6 +430,8 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
                                 }
                             }
                         }
+
+                        continue;
                     } catch {
                         // Ignore partial JSON
                     }
@@ -487,10 +445,9 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
                 }
             }
 
-            if (unparsedText) {
-                unparsedText = unparsedText.replace(/<think>/g, '\n\n***🧠 Thinking Process:***\n\n');
-                unparsedText = unparsedText.replace(/<\/think>/g, '\n\n---\n\n');
-                progress.report(new vscode.LanguageModelTextPart(unparsedText));
+            const remainingVisibleText = visibleTextFilter.flush();
+            if (remainingVisibleText) {
+                progress.report(new vscode.LanguageModelTextPart(remainingVisibleText));
             }
 
             const nativeToolCalls = Array.from(streamedNativeToolCalls.values());
@@ -1181,6 +1138,111 @@ Act like a premium autonomous agent. Use tools iteratively until the entire job 
         }
 
         return this.getOpenAIMessageText(message.content);
+    }
+
+    private createReasoningContentFilter(): { push: (chunk: string) => string; flush: () => string } {
+        let pending = '';
+        let hiddenTag: '</think>' | '</details>' | undefined;
+
+        return {
+            push: (chunk: string): string => {
+                pending += chunk;
+                let visible = '';
+
+                while (pending.length > 0) {
+                    if (hiddenTag) {
+                        const closeIndex = pending.indexOf(hiddenTag);
+                        if (closeIndex === -1) {
+                            pending = pending.slice(-Math.max(hiddenTag.length - 1, 0));
+                            return visible;
+                        }
+
+                        pending = pending.slice(closeIndex + hiddenTag.length);
+                        hiddenTag = undefined;
+                        continue;
+                    }
+
+                    const nextHiddenBlock = this.findNextReasoningBlockStart(pending);
+                    if (!nextHiddenBlock) {
+                        const suffixLength = this.getReasoningTagPrefixLength(pending);
+                        visible += pending.slice(0, pending.length - suffixLength);
+                        pending = pending.slice(pending.length - suffixLength);
+                        return visible;
+                    }
+
+                    visible += pending.slice(0, nextHiddenBlock.index);
+                    pending = pending.slice(nextHiddenBlock.index + nextHiddenBlock.openTag.length);
+                    hiddenTag = nextHiddenBlock.closeTag;
+                }
+
+                return visible;
+            },
+            flush: (): string => {
+                if (hiddenTag) {
+                    return '';
+                }
+
+                const visible = pending;
+                pending = '';
+                return visible;
+            }
+        };
+    }
+
+    private findNextReasoningBlockStart(text: string): { index: number; openTag: string; closeTag: '</think>' | '</details>' } | undefined {
+        const candidates = [
+            { marker: '<think>', openTag: '<think>', closeTag: '</think>' as const },
+            { marker: '<details>', openTag: '<details>', closeTag: '</details>' as const },
+            { marker: '<details ', openTag: '<details', closeTag: '</details>' as const }
+        ]
+            .map(candidate => ({ ...candidate, index: text.indexOf(candidate.marker) }))
+            .filter(candidate => candidate.index !== -1)
+            .sort((a, b) => a.index - b.index);
+
+        if (candidates.length === 0) {
+            return undefined;
+        }
+
+        const first = candidates[0];
+        if (first.openTag === '<details') {
+            const endOfTag = text.indexOf('>', first.index);
+            if (endOfTag === -1) {
+                return {
+                    index: first.index,
+                    openTag: text.slice(first.index),
+                    closeTag: '</details>'
+                };
+            }
+
+            return {
+                index: first.index,
+                openTag: text.slice(first.index, endOfTag + 1),
+                closeTag: '</details>'
+            };
+        }
+
+        return {
+            index: first.index,
+            openTag: first.openTag,
+            closeTag: first.closeTag
+        };
+    }
+
+    private getReasoningTagPrefixLength(text: string): number {
+        const prefixes = [
+            '<', '</',
+            '<t', '</t', '<th', '</th', '<thi', '</thi', '<thin', '</thin', '<think', '</think',
+            '<d', '</d', '<de', '</de', '<det', '</det', '<deta', '</deta', '<detai', '</detai', '<detail', '</detail', '<details', '</details'
+        ];
+        const maxLength = Math.min(text.length, 9);
+
+        for (let length = maxLength; length > 0; length -= 1) {
+            if (prefixes.includes(text.slice(-length))) {
+                return length;
+            }
+        }
+
+        return 0;
     }
 
     private joinTextParts(parts: string[]): string | null {
