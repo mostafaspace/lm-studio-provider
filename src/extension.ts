@@ -5,6 +5,8 @@ const DEFAULT_API_BASE = 'http://localhost:1234';
 
 let lmStudioProvider: LMStudioChatProvider | undefined;
 let connectionPanel: vscode.WebviewPanel | undefined;
+let statusBarItem: vscode.StatusBarItem;
+let statusInterval: NodeJS.Timeout | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('LM Studio Provider extension activated');
@@ -124,13 +126,66 @@ export function activate(context: vscode.ExtensionContext) {
 
         console.log('LM Studio configuration changed, refreshing models');
         lmStudioProvider?.forceRefresh();
+        
+        // Restart monitoring if API base changed
+        if (event.affectsConfiguration('lmstudio.apiBase')) {
+            startConnectivityMonitoring();
+        }
     });
 
     context.subscriptions.push(diagnosticCommand, testCommand, setApiBaseCommand, configurationListener);
+    
+    // Initialize Status Bar
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'lmstudio.setApiBase';
+    context.subscriptions.push(statusBarItem);
+    
+    // Start connectivity monitoring
+    startConnectivityMonitoring();
+    
     console.log('LM Studio Provider initialized');
 }
 
+function startConnectivityMonitoring() {
+    if (statusInterval) {
+        clearInterval(statusInterval);
+    }
+
+    // Initial check
+    void updateStatusBarStatus();
+
+    // Poll every 30 seconds
+    statusInterval = setInterval(() => {
+        void updateStatusBarStatus();
+    }, 30000);
+}
+
+async function updateStatusBarStatus() {
+    const apiBase = getConfiguredApiBase();
+    const url = `${apiBase}/api/v1/models`;
+
+    try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        if (response.ok) {
+            statusBarItem.text = `$(circle-filled) LM Studio: Online`;
+            statusBarItem.tooltip = `Connected to ${apiBase}. Found models.`;
+            statusBarItem.backgroundColor = undefined;
+            statusBarItem.color = new vscode.ThemeColor('testing.iconPassed');
+        } else {
+            throw new Error(`Status ${response.status}`);
+        }
+    } catch (error) {
+        statusBarItem.text = `$(circle-outline) LM Studio: Offline`;
+        statusBarItem.tooltip = `Cannot reach ${apiBase}. Make sure LM Studio server is running.`;
+        statusBarItem.color = new vscode.ThemeColor('errorForeground');
+    }
+    statusBarItem.show();
+}
+
 export function deactivate() {
+    if (statusInterval) {
+        clearInterval(statusInterval);
+    }
     lmStudioProvider?.dispose();
     console.log('LM Studio Provider deactivated');
 }

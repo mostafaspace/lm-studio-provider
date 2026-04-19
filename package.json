@@ -4,6 +4,7 @@
   "displayName": "LM Studio Provider",
   "description": "Integrates LM Studio with GitHub Copilot Chat",
   "version": "0.0.1",
+  "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },
